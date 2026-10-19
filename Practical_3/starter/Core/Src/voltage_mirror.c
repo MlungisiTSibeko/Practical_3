@@ -16,7 +16,22 @@ bool voltage_mirror_init(void)
      * Set ADC1->CFGR1, ADC1->CHSELR, ADC1->SMPR, DAC->DHR12R1 and DAC->CR.
      * Finish by returning board_adc_enable(). Remove the false return below.
      */
-    return false; /* The uncompleted starter intentionally does not acquire. */
+    /* ADC1: 12-bit, right-aligned, single, software-started. */
+      ADC1->CFGR1 = 0u;                    /* RES=00, ALIGN=0, CONT=0, EXTEN=00 */
+
+      /* Channel 5 only. */
+      ADC1->CHSELR = ADC_CHSELR_CHSEL5;
+
+      /* Sampling time = 239.5 ADC cycles -> SMP = 111b. */
+      ADC1->SMPR = 7u;
+
+      /* DAC1: buffer on, trigger off, initial mid-scale command. */
+      DAC->DHR12R1 = 2048u;
+      DAC->CR = DAC_CR_EN1;                /* EN1=1, BOFF1=0, TEN1=0 */
+
+      /* Enable the ADC last. */
+      return board_adc_enable();
+
 }
 
 bool voltage_mirror_read(uint16_t *code)
@@ -26,14 +41,35 @@ bool voltage_mirror_read(uint16_t *code)
      * Return true only when *code contains a real acquired 12-bit result.
      * On timeout request ADSTP, then return false. Never wait forever.
      */
-    (void)code;
-    return false;
+	if (code == NULL) return false;
+
+	    /* W1C: clear EOC, EOS, OVR before starting. */
+	    ADC1->ISR = ADC_ISR_EOC | ADC_ISR_EOS | ADC_ISR_OVR;
+
+	    /* Start one software-triggered conversion. */
+	    ADC1->CR |= ADC_CR_ADSTART;
+
+	    /* Bounded wait. At 239.5 cycles + overhead, 100000 is generous. */
+	    uint32_t timeout = 100000u;
+	    while ((ADC1->ISR & ADC_ISR_EOC) == 0u)
+	    {
+	        if (--timeout == 0u)
+	        {
+	            ADC1->CR |= ADC_CR_ADSTP;    /* stop the conversion */
+	            return false;
+	        }
+	    }
+
+	    /* Reading DR returns the 12-bit right-aligned result and clears EOC. */
+	    *code = (uint16_t)(ADC1->DR & 0x0FFFu);
+	    return true;
 }
 
 void voltage_mirror_write(uint16_t code)
 {
     /* TODO 3: limit code to 0..4095 and write DAC->DHR12R1. */
-    (void)code;
+    if (code > MIRROR_MAX_CODE) code = MIRROR_MAX_CODE;
+    DAC->DHR12R1 = code;
 }
 
 uint16_t voltage_mirror_map(uint16_t code, bool coarse)
@@ -42,6 +78,9 @@ uint16_t voltage_mirror_map(uint16_t code, bool coarse)
      * the six most significant bits and clears the six least significant.
      * Retain the 12-bit DAC scale: do not send a 0..63 code directly.
      */
-    (void)coarse;
-    return code;
+	if (code > MIRROR_MAX_CODE) code = MIRROR_MAX_CODE;
+
+	if(!coarse) return code;
+
+	return (uint16_t)(code & 0xFFC0u);
 }
